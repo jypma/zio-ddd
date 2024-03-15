@@ -93,6 +93,8 @@ data: <Invoice ...>
   + This was before Akka's license change
 - Currently still on ZIO 1, but I'll present ZIO 2 equivalents today
 * ZIO
+** Better than Java
+[[file:better-than-java.jpg]]
 ** Introduction
 - An instance of =ZIO= is a /description/ of a program that, given an /environment/, will /eventually/ either produce a /result/ or an /error/:
   + =ZIO[R,E,T]=
