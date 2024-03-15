@@ -1,0 +1,210 @@
+#+TITLE: Anti-corruption layers through functional type safety
+* Introduction
+** About me
+
+Jan Ypma
+
+- Freelance software architect & coach
+- Distributed systems & microservices
+- Domain-driven design
+- Open source enthusiast
+
+* Domain-driven design
+** Bounded context
+*** Introduction
+[[file:bounded-context.jpg]]
+*** Description
+- Reasoning about complex business processes requires abstractions
+  * A /domain model/ implements these abstractions as code
+- Abstractions, and hence models, have a limited applicability
+- /Bounded context/ makes this explicit
+  * When creating a domain model, evaluate the scope of your design
+  * Create sub-domains when you encounter them
+  * Describe the bounds for your domain
+
+- Bounded context is often a good candidate for Microservice boundaries
+
+** Ubiquitous language
+*** Introduction
+[[file:ubiquitous-language.jpg]]
+*** Description
+- We have a domain model, great!
+- Added value comes from day-to-day conversations
+  * Among developers
+  * Between developers and the customer
+  * Between developers and the user
+- Is everyone speaking the same language?
+
+- /Ubiqutous language/: All team members use important terms in the same way
+  * Within a bounded context
+** Patterns
+*** Anti-corruption layer
+[[file:anti-corruption-layer.jpg]]
+*** Published language
+[[file:published-language.jpg]]
+* Our mission
+** System introduction
+*** Let's store our invoices in the cloud
+[[file:invoice-cloud.jpg]]
+*** System architecture
+[[file:diagram.png]]
+- An invoice is an invoice, right?
+- How many bounded contexts?
+** Univeral Business Language
+- XML specification for transactional business documents
+- Invoice, Credit Note, Order, Shipments, Suppliers, ...
+
+- Abstracts away from US-centric model of the cloud service
+
+- Example: Invoice vs. Credit Note
+  + Cloud: credit note and invoice are the same
+  + UBL: Invoice and credit note are separate document types
+
+- Example: Phone numbers
+  + Cloud: phone number must conform to US rules (country, area code, local code and extension)
+  + UBL: phone numbers are free-format
+** Event-based API
+- We want individual countries to easily be able to find new invoices and suppliers
+#+BEGIN_SRC restclient
+GET /api/invoices?since=2024-03-15T09:54:00Z
+Accept: text/event-stream
+
+200 OK
+Content-type: text/event-stream
+
+data: <Invoice ...>
+
+data: <Invoice ...>
+#+END_SRC
+- Within HTTP (and REST), several established mechanisms to query events:
+  + Server-sent events
+  + Websockets
+  + Long polling (/"hanging GET"/)
+  + Short polling
+
+- We'll ourselves also poll the cloud service for changes
+  + No, they won't have a nice event API themselves...
+
+- Use *Kafka* as intermediate storage
+** Software stack
+- Client preferred Scala
+- Akka was chosen initially due to earlier experience
+- Migrated to ZIO since it was a better fit
+  + This was before Akka's license change
+- Currently still on ZIO 1, but I'll present ZIO 2 equivalents today
+* ZIO
+** Introduction
+- An instance of =ZIO= is a /description/ of a program that, given an /environment/, will /eventually/ either produce a /result/ or an /error/:
+  + =ZIO[R,E,T]=
+- You'll often use one of its aliases
+  + =Task[T] = ZIO[Any, Throwable, T]=
+  + =UIO[T] = ZIO[Any, Nothing, T]=
+  + =URIO[R, T] = ZIO[R, Nothing, T]=
+** Streams
+- An instance of =ZStream= is a /description/ of a program that, given an /environment/ will /ad-hoc/ emit a series of /result/ values, potentially ending successfully or with an /error/:
+  + =ZStream[R,E,T]=
+** Other data types
+- =Promise[E,T]=: A placeholder that will /eventually/ complete with either a /value/ or an /error/
+- =Ref[T]=: A mutable reference that can be atomically changed using =ZIO= programs.
+* The cloud(s) darken
+** A typical day at our cloud invoice friends
+[[file:slow-invoices.png]]
+- Find out we have no new invoices? 10 seconds
+- Store a new value in a key/value structure? 1 second
+** Limit concurrent connections
+*** Our first encounter with optimizing connectivity
+*Us*: 1 second to store a key/value pair is kinda slow. Lets do it concurrently over 400 connections to speed it up.
+
+*Them*: /Crash/
+
+*Us*: So sorry, we crashed your server. How many concurrent connections do you support?
+
+*Them*: 16
+
+*Them* (one month later)r: Oh, and we'll be rate limiting the API from now on. Please only max 25 requests per second.
+*** - =ZStream.mapZIOParUnordered= to limit concurrency
+- Processing items concurrently without threads
+- Just say how many requests you want in parallel
+  + But only for the current stream
+*** Write a rate limiter
+#+BEGIN_SRC scala
+case class Bucket(size: Long, maxSize: Long, waiting:Seq[Promise[Nothing, Unit]] = Seq.empty) {
+  /** Adds a token to the bucket, by either completing a waiting promise, or save the token for later. */
+  def addOne: UIO[Bucket] = ???
+
+  /** Takes a token from the bucket, completing the returned promise once one is available. */
+  def takeOne: URIO[Clock, (Promise[Nothing, Unit], Bucket)] = ???
+}
+#+END_SRC
+- =Clock= (in this implementation only used for metrics) provides a nice way to
+  + See that a =ZIO= depends on the real-clock
+  + Unit test that =ZIO= against a fake clock
+** API inconsistencies
+*** CRUD? Nope
+*Us:* Please create this object
+
+*Them*: Thanks, here's your object ID
+
+*Us*: Please set the object with this ID to complete, we're done
+
+*Them*: What object?
+
+*Them* (helpdesk): /Yeah, mysql replication slave database read queries something something.../
+*** CRUD? Nope
+Solution: just change this
+#+BEGIN_SRC scala
+_ <- updateObjectStatus(id, done = true)
+#+END_SRC
+to this
+#+BEGIN_SRC scala
+val retrySchedule = Schedule.exponential(1.second) && Schedule.recurs(settings.maxRetries)
+// ...
+_ <- updateObjectStatus(id, done = true).retry(retrySchedule)
+#+END_SRC
+** Performance issues
+*** Slow to return invoices
+- Imagine you're building an invoicing system. How long would you take to return an invoice with 100 lines?
+*** Slow to return invoices
+- Imagine you're building an invoicing system. How long would you take to return an invoice with 100 lines?
+
+/2 minutes/. At least.
+
+Solution: just change this
+#+BEGIN_SRC scala
+invoice <- readInvoice(id)
+#+END_SRC
+to this
+#+BEGIN_SRC scala
+invoice <- readInvoice(id)
+  .tapError(err => emitReadFailure(id, err))
+  .retry(retrySchedule)
+#+END_SRC
+
+** Event journal bug
+- Our Kafka client abstraction:
+#+BEGIN_SRC scala
+def produceString(topic: String, key: String, message: String): Task[RecordMetadata]
+#+END_SRC
+(=Task= because =zio-kafka= doesn't have a modeled error data type)
+
+- Writing to our event journal:
+  + When writing this code, the developer is forced to make a decision on what to do with the error
+  + Unlike Java exceptions, in ZIO when an error type is present, it does mean it's expected to actually occur
+#+BEGIN_SRC scala
+def log(event: JournalEvent): UIO[Unit] = (for {
+  json <- serializer.toJSON(event)
+  _ <- kafka.produceString("eventBus", event.key, json)
+} yield ()).catchAll { err =>
+  // We need this catchAll, since UIO[Unit] must have Nothing as error type.
+  log.error("Can't write to journal. Ignoring and resuming", err)
+}
+#+END_SRC
+
+Some time later:
+- We introduce a bug when marshaling JSON (=json4s=, this was before =zio-schema=)
+- No impact to application logic because of this
+** Did we ever really fail ourselves?
+- Once. Azure upgrading the linux kernel to cgroups v2, which our JVM didn't understand
+
+* Conclusion
+ We thought we'd just be a /Published Language/ , but ended up being one big /Anti-corruption layer/
