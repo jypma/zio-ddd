@@ -9,6 +9,10 @@ Jan Ypma
 - Domain-driven design
 - Open source enthusiast
 
+=jan@ypmania.net=
+
+These slides: =https://github.com/jypma/zio-ddd/=
+
 * Domain-driven design
 ** Bounded context
 *** Introduction
@@ -209,4 +213,22 @@ Some time later:
 - Once. Azure upgrading the linux kernel to cgroups v2, which our JVM didn't understand
 
 * Conclusion
- We thought we'd just be a /Published Language/ , but ended up being one big /Anti-corruption layer/
+** Integration
+We thought we'd just be a /Published Language/ , but ended up being one big /Anti-corruption layer/
+
+/Next steps/
+
+Customer:
+- Will be taking ownership of this integration themselves
+- Is evaluating lessons learned and experiences with the cloud invoicing provider
+** One more thing
+- Want to play with ZIO?
+- Interested in doing some frontend development?
+- Like the idea of =ScalaJS=, or perhaps have played with the awesome =Laminar= framework?
+- Curious how the green architecture diagram was drawn? (hint: It's related to Scala)
+
+- Please check out and share your comments about /Lazagna/, a new ZIO-based frontend framework that I'm developing
+
+    =https://github.com/jypma/lazagna/=
+
+- Thanks for your time!
