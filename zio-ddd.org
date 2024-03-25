@@ -16,6 +16,7 @@ These slides: =https://github.com/jypma/zio-ddd/=
 * Domain-driven design
 ** Bounded context
 *** Introduction
+#+ATTR_ORG: :width 60%
 [[file:bounded-context.jpg]]
 *** Description
 - Reasoning about complex business processes requires abstractions
@@ -30,6 +31,7 @@ These slides: =https://github.com/jypma/zio-ddd/=
 
 ** Ubiquitous language
 *** Introduction
+#+ATTR_ORG: :width 60%
 [[file:ubiquitous-language.jpg]]
 *** Description
 - We have a domain model, great!
@@ -43,14 +45,41 @@ These slides: =https://github.com/jypma/zio-ddd/=
   * Within a bounded context
 ** Patterns
 *** Anti-corruption layer
+#+ATTR_ORG: :width 60%
 [[file:anti-corruption-layer.jpg]]
+*** Anti-corruption layer
+
+- We have dependency on a service in a different bounded context
+  + They're probably using a different language
+    * Example: government tax registration
+    * Example: /Account/ in different departments
+
+- Let's have an /explicit layer/ that shields us from the other service's vocabulary
+  * Other advantages apply
+
 *** Published language
+#+ATTR_ORG: :width 60%
 [[file:published-language.jpg]]
+*** Published language
+
+- We're operating in a domain that's present in many other businesses
+  + Contact data
+  + Invoices
+  + Appointments
+
+- Should we invent our own wheels
+  + Yes, our [insert data here] is special!
+  + No?
+
+- Embrace a /published language/ into your ubiquitous language
+  + and, hence, in your system APIs
 * Our mission
 ** System introduction
 *** Let's store our invoices in the cloud
+#+ATTR_ORG: :width 60%
 [[file:invoice-cloud.jpg]]
 *** System architecture
+#+ATTR_ORG: :width 60%
 [[file:diagram.png]]
 - An invoice is an invoice, right?
 - How many bounded contexts?
@@ -98,25 +127,46 @@ data: <Invoice ...>
 - Currently still on ZIO 1, but I'll present ZIO 2 equivalents today
 * ZIO
 ** Better than Java
+#+ATTR_ORG: :width 60%
 [[file:better-than-java.jpg]]
 ** Introduction
 - An instance of =ZIO= is a /description/ of a program that, given an /environment/, will /eventually/ either produce a /result/ or an /error/:
   + =ZIO[R,E,T]=
+  + Think of it as =R=  ==>= =Future[Either[E,T]]=
+  + But it's a /value/
+
 - You'll often use one of its aliases
   + =Task[T] = ZIO[Any, Throwable, T]=
   + =UIO[T] = ZIO[Any, Nothing, T]=
   + =URIO[R, T] = ZIO[R, Nothing, T]=
+
+- One thing you'll often see as environment type
+  + =Scope= means the ZIO holds a resource, that requires clean-up when its usage ends.
+  + A scoped ZIO requires a =Scope= instance to run
+#+BEGIN_SRC scala
+val myZIO: ZIO[Scope, Nothing, Unit] = ???
+ZIO.scoped { myZIO } // Makes sure Scope is cleaned up after myZIO is done
+#+END_SRC
 ** Streams
 - An instance of =ZStream= is a /description/ of a program that, given an /environment/ will /ad-hoc/ emit a series of /result/ values, potentially ending successfully or with an /error/:
   + =ZStream[R,E,T]=
+
+- Typical stream operators
+  + =.mapZIO(t= ==>= =ZIO.succeed(t))= : Evaluate a ZIO for every element
+  + =.changes=  : Only output when =T= changes
+  + =.grouped(3)= :  Collect 3 instances of =T= and emit them together
+  + =.groupedWithin(3, 1.second)= : Collect up to 3 instances of =T= and emit those, or emit whatever did arrive within 1 second
+
 ** Other data types
+
 - =Promise[E,T]=: A placeholder that will /eventually/ complete with either a /value/ or an /error/
+
 - =Ref[T]=: A mutable reference that can be atomically changed using =ZIO= programs.
 * The cloud(s) darken
 ** A typical day at our cloud invoice friends
+#+ATTR_ORG: :width 60%
 [[file:slow-invoices.png]]
-- Find out we have no new invoices? 10 seconds
-- Store a new value in a key/value structure? 1 second
+Find out we have no new invoices? /10 seconds/.   Store a new value in a key/value structure? /1 second/.
 ** Limit concurrent connections
 *** Our first encounter with optimizing connectivity
 *Us*: 1 second to store a key/value pair is kinda slow. Lets do it concurrently over 400 connections to speed it up.
@@ -134,6 +184,10 @@ data: <Invoice ...>
   + But only for the current stream
 *** Write a rate limiter
 #+BEGIN_SRC scala
+trait RateLimiter {
+  def rateLimit[R,E,A](effect: => ZIO[R,E,A]): ZIO[R,E,A]
+}
+
 case class Bucket(size: Long, maxSize: Long, waiting:Seq[Promise[Nothing, Unit]] = Seq.empty) {
   /** Adds a token to the bucket, by either completing a waiting promise, or save the token for later. */
   def addOne: UIO[Bucket] = ???
@@ -141,7 +195,22 @@ case class Bucket(size: Long, maxSize: Long, waiting:Seq[Promise[Nothing, Unit]]
   /** Takes a token from the bucket, completing the returned promise once one is available. */
   def takeOne: URIO[Clock, (Promise[Nothing, Unit], Bucket)] = ???
 }
+
+def make(size: Long, refillInterval: Duration): ZIO[Clock & Scope, Nothing, RateLimiter] = for {
+  bucket <- Ref.Synchronized.make(Bucket(size, size))
+  clock <- ZIO.service[Clock]
+  _ <- bucket.updateZIO(_.addOne).repeat(Schedule.spaced(refillInterval).delay(refillInterval)).forkScoped
+} yield new RateLimiter {
+  def rateLimit[R,E,A](effect: => ZIO[R,E,A]): ZIO[R,E,A] = {
+    for {
+      promise <- bucket.modifyZIO(_.takeOne).provide(ZLayer.succeed(clock))
+      _ <- promise.await
+      res <- effect
+    } yield res
+  }
+}
 #+END_SRC
+*** Write a rate limiter
 - =Clock= (in this implementation only used for metrics) provides a nice way to
   + See that a =ZIO= depends on the real-clock
   + Unit test that =ZIO= against a fake clock
@@ -221,6 +290,23 @@ We thought we'd just be a /Published Language/ , but ended up being one big /Ant
 Customer:
 - Will be taking ownership of this integration themselves
 - Is evaluating lessons learned and experiences with the cloud invoicing provider
+** Evaluation of ZIO
+*** Conclusions
+- Very flexible, by having reactive streams combined with very useful concurrency primitives
+
+- /Environment/ concept =[R]= requires getting used to
+  + But turned out to be an awesome step forward from Spring's good ol' dependency injection
+
+- Required error handling (combined with Scala's easy case classes) not a kludge, but a virtue
+*** ZIO in a loom world
+With /project loom/, do we still need IO monads like ZIO?
+
++ Yes, several advantages are provided:
+  * Explicit error handling (using =Either= in imperative style pops you right back into monad land)
+  * Resource managed through =Scope=
+  * Interruption of fibers (=race= will actually safely and predictably interrupt other fibers)
+  * Applying modifications on a =ZIO= like =.retry()= and =.timeout()=
+
 ** One more thing
 - Want to play with ZIO?
 - Interested in doing some frontend development?
@@ -232,3 +318,5 @@ Customer:
     =https://github.com/jypma/lazagna/=
 
 - Thanks for your time!
+
+    =jan@ypmania.net=
